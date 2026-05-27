@@ -1244,6 +1244,7 @@ impl Client {
             // WAWebSendUserMsgJob reads local device table only on the send
             // path; WAWebDBDeviceListFanout excludes hosted devices.
             let recipient_bare = self.resolve_encryption_jid(&to).await.to_non_ad();
+            let recipient_is_lid = recipient_bare.is_lid();
 
             // Local registry first; network warm only on miss to avoid
             // unnecessary LID-migration side effects from get_user_devices
@@ -1296,6 +1297,21 @@ impl Client {
                     || own_lid.is_some_and(|lid| j.is_same_user_as(lid) && j.device == lid.device);
                 !is_sender
             });
+
+            // own_cached is keyed by the bot's PN, so own devices come back
+            // PN-addressed. The server rejects a stanza that mixes PN and LID
+            // participants, so align own devices to LID for a LID recipient
+            // (whatsmeow switches ownID to LID before fanout).
+            if recipient_is_lid {
+                let lid = own_lid.ok_or_else(|| {
+                    anyhow!("Cannot send a LID-addressed DM before the device LID is known")
+                })?;
+                for j in all_dm_jids.iter_mut() {
+                    if j.is_pn() && j.is_same_user_as(own_jid) {
+                        *j = Jid::lid_device(lid.user.clone(), j.device);
+                    }
+                }
+            }
 
             // Same-namespace dedup only; cross-namespace overlap is avoided
             // upstream via `is_self_dm_recipient`.
