@@ -533,10 +533,34 @@ impl<'a> ChatActions<'a> {
         index: &[u8],
         value: &wa::SyncActionValue,
     ) -> Result<()> {
+        // Chat actions still emit action version 1 (their pre-existing behavior).
+        // whatsmeow uses per-action versions (mute=2, pin=5, archive=3, ...);
+        // aligning these is tracked as a follow-up.
+        self.client
+            .send_app_state_mutation(collection, index, value, 1)
+            .await
+    }
+}
+
+impl Client {
+    pub fn chat_actions(&self) -> ChatActions<'_> {
+        ChatActions::new(self)
+    }
+
+    /// Encode a single `Set` app-state mutation (stamped with the action schema
+    /// `version`) and send it as a patch on `collection`. Shared by the
+    /// chat-action and label features.
+    pub(crate) async fn send_app_state_mutation(
+        &self,
+        collection: WAPatchName,
+        index: &[u8],
+        value: &wa::SyncActionValue,
+        version: i32,
+    ) -> Result<()> {
         use rand::Rng;
         use wacore::appstate::encode::encode_record;
 
-        let proc = self.client.get_app_state_processor().await;
+        let proc = self.get_app_state_processor().await;
         let key_id = proc
             .backend
             .get_latest_sync_key_id()
@@ -555,16 +579,10 @@ impl<'a> ChatActions<'a> {
             &keys,
             &key_id,
             &iv,
+            version,
         );
 
-        self.client
-            .send_app_state_patch(collection.as_str(), vec![mutation])
+        self.send_app_state_patch(collection.as_str(), vec![mutation])
             .await
-    }
-}
-
-impl Client {
-    pub fn chat_actions(&self) -> ChatActions<'_> {
-        ChatActions::new(self)
     }
 }
