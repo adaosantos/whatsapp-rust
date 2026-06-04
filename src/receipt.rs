@@ -153,6 +153,10 @@ impl Client {
             .unwrap_or_else(wacore::time::now_utc);
 
         let receipt_type = ReceiptType::parse(receipt_type_str);
+        // WA Web downgrades a delivery ack to "sent" (not delivered) when the receipt carries
+        // <error reason="lid" type="feature-incapable"> (the LID peer can't receive it).
+        let receipt_type =
+            wacore::stanza::receipt::downgrade_for_feature_incapable(nr, receipt_type);
         let is_view = receipt_type_str == "view";
         let is_group = from.is_group();
         let default_sender = if is_group {
@@ -189,7 +193,13 @@ impl Client {
                 // aggregated_by_message: each <user> carries its own type;
                 // aggregated_by_type: all users share the receipt-level type.
                 let effective_type = match user.r#type.as_deref() {
-                    Some(t) => ReceiptType::parse(t),
+                    // Apply the receipt-level feature-incapable downgrade to the per-user type
+                    // too, so an aggregated delivery receipt with a feature-incapable LID
+                    // participant doesn't re-emit a delivered tick for it.
+                    Some(t) => wacore::stanza::receipt::downgrade_for_feature_incapable(
+                        nr,
+                        ReceiptType::parse(t),
+                    ),
                     None => receipt_type.clone(),
                 };
                 let r = Receipt {
