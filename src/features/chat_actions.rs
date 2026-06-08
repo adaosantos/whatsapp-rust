@@ -281,6 +281,13 @@ fn bool_str(b: bool) -> &'static str {
 
 /// Assemble the JSON-array mutation index for `schema` from its non-literal index
 /// args (in `schema.index_parts` order). The arg count must match.
+/// A `contact` app-state mutation is keyed by a bare phone-number JID. Reject
+/// LIDs (a separate WA Web path), group/status/broadcast/newsletter JIDs, and
+/// AD/device JIDs (e.g. `123:4@s.whatsapp.net`) that would form an invalid index.
+fn is_valid_contact_id(jid: &Jid) -> bool {
+    jid.is_pn() && jid.device == 0
+}
+
 pub(crate) fn build_action_index(schema: &Schema, args: &[&str]) -> Result<Vec<u8>> {
     let non_literal = schema
         .index_parts
@@ -489,6 +496,45 @@ impl<'a> ChatActions<'a> {
                 ],
                 &value,
             )
+            .await
+    }
+
+    /// Save or rename a contact, syncing the name to the user's other linked devices.
+    ///
+    /// Writes a `contact` app-state SET mutation (WAWebContactSync.getContactSyncMutation)
+    /// to the `critical_unblock_low` collection with index `["contact", jid]`.
+    /// `full_name`/`first_name` are sent verbatim; an absent `first_name` is omitted
+    /// (WA Web derives no short-name default). `save_on_primary_addressbook` controls
+    /// whether it is saved to the phone's address book.
+    ///
+    /// The contact id must be a phone-number JID: WA Web refuses to send a contact
+    /// mutation keyed by a LID (LID contacts use a separate path), so a LID is rejected.
+    pub async fn save_contact(
+        &self,
+        jid: &Jid,
+        full_name: Option<String>,
+        first_name: Option<String>,
+        save_on_primary_addressbook: bool,
+    ) -> Result<()> {
+        if !is_valid_contact_id(jid) {
+            anyhow::bail!(
+                "save_contact: contact id must be a bare phone-number JID (not a LID, group, or device-specific JID)"
+            );
+        }
+        debug!("Saving contact {jid}");
+        let value = wa::SyncActionValue {
+            contact_action: Some(wa::sync_action_value::ContactAction {
+                full_name,
+                first_name,
+                save_on_primary_addressbook: Some(save_on_primary_addressbook),
+                ..Default::default()
+            }),
+            timestamp: Some(wacore::time::now_millis()),
+            ..Default::default()
+        };
+        let jid_str = jid.to_string();
+        self.client
+            .send_app_state_action(&schemas::CONTACT, &[jid_str.as_str()], &value)
             .await
     }
 
@@ -742,6 +788,7 @@ mod registry_tests {
         assert_eq!(schemas::ARCHIVE.version, 3);
         assert_eq!(schemas::MARK_CHAT_AS_READ.version, 3);
         assert_eq!(schemas::STAR.version, 2);
+        assert_eq!(schemas::CONTACT.version, 2);
         assert_eq!(schemas::DELETE_MESSAGE_FOR_ME.version, 3);
         assert_eq!(schemas::LABEL_EDIT.version, 3);
         assert_eq!(schemas::LABEL_JID.version, 3);
@@ -762,5 +809,35 @@ mod registry_tests {
             // Round-trips through the wire name.
             assert_eq!(collection_patch_name(c).as_str(), c.as_str());
         }
+    }
+
+    #[test]
+    fn contact_action_index_and_collection() {
+        // WAWebContactSync writes ["contact", jid] to critical_unblock_low.
+        let index = build_action_index(&schemas::CONTACT, &["5511999@s.whatsapp.net"]).unwrap();
+        let parts: Vec<String> = serde_json::from_slice(&index).unwrap();
+        assert_eq!(
+            parts,
+            vec!["contact".to_string(), "5511999@s.whatsapp.net".to_string()]
+        );
+        assert_eq!(
+            collection_patch_name(schemas::CONTACT.collection),
+            WAPatchName::CriticalUnblockLow
+        );
+    }
+
+    #[test]
+    fn contact_id_validation_accepts_only_bare_pn() {
+        let valid = |s: &str| is_valid_contact_id(&s.parse::<Jid>().expect("test JID"));
+        // bare PN -> accepted
+        assert!(valid("5511999@s.whatsapp.net"));
+        // AD/device-specific PN -> rejected (would form an invalid contact index)
+        assert!(!valid("5511999:4@s.whatsapp.net"));
+        // LID -> rejected (separate WA Web path)
+        assert!(!valid("100000012345678@lid"));
+        // group / newsletter / status -> rejected
+        assert!(!valid("120363012345@g.us"));
+        assert!(!valid("123@newsletter"));
+        assert!(!valid("status@broadcast"));
     }
 }
