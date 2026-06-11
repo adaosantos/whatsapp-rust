@@ -2843,6 +2843,7 @@ dependencies = [
  "bytes",
  "chrono",
  "codspeed-divan-compat",
+ "compact_str",
  "ctr",
  "event-listener",
  "flate2",
@@ -2988,9 +2989,12 @@ dependencies = [
 name = "waproto"
 version = "0.6.0"
 dependencies = [
+ "heck",
  "prost",
  "prost-build",
+ "prost-types",
  "serde",
+ "sha2",
 ]
 
 [[package]]
