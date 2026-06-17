@@ -201,7 +201,7 @@ fn build_retry_processing_key(chat: &Jid, message_id: &str, participant_jid: &Ji
 }
 
 impl Client {
-    #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.retry.handle_receipt", level = "debug", skip_all, fields(chat = %receipt.source.chat.observe(), sender = %receipt.source.sender.observe()), err(Debug)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.retry.handle_receipt", level = "debug", skip_all, fields(chat = %receipt.source.chat.observe(), sender = %receipt.source.sender.observe(), count = tracing::field::Empty), err(Debug)))]
     pub(crate) async fn handle_retry_receipt(
         self: &Arc<Self>,
         receipt: &Receipt,
@@ -222,17 +222,24 @@ impl Client {
             .map(|v| v.as_str())
             .and_then(|s| s.parse().ok())
             .unwrap_or(1);
+        // Record the count on the span so retry-storm depth is aggregable per
+        // sender even when the cap refuses early below.
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("count", retry_count);
 
         // Refuse to handle retries that have exceeded the maximum attempts.
         // This prevents infinite retry loops and matches WhatsApp Web's behavior.
+        // Logged at debug: remote-driven, expected and fully handled — WA Web
+        // emits this refusal via WALogger.LOG (informational), not WARN.
         if retry_count >= MAX_RETRY_COUNT {
-            warn!(
+            debug!(
                 "Refusing retry #{} for message {} from {}: exceeds max attempts ({})",
                 retry_count,
                 message_id,
                 receipt.source.sender.observe(),
                 MAX_RETRY_COUNT
             );
+            wacore::telemetry::retry_refused();
             return Ok(());
         }
 
@@ -280,6 +287,14 @@ impl Client {
             .has_device(&info.requester.user, sender_device_id)
             .await;
         if !device_known {
+            // Parity with WA Web's MdRetryFromUnknownDevice WAM (id 2178), which
+            // commits here only — not from the shared inbound device sync, which
+            // schedule_unknown_device_sync is also called from elsewhere.
+            wacore::telemetry::retry_unknown_device(if sender_device_id == 0 {
+                "primary"
+            } else {
+                "companion"
+            });
             self.schedule_unknown_device_sync(info.requester.to_non_ad(), receipt.offline)
                 .await;
         }
@@ -758,12 +773,18 @@ impl Client {
                 .await
             {
                 Ok(true) => {
-                    warn!(
-                        "Base key collision detected for {} at retry #{}. \
+                    // Informational, not WARN: this is the corrective action WA
+                    // Web takes here too (WAWebUpdateLocalSignalSession logs the
+                    // same-base-key delete via WALogger.LOG), and the three
+                    // sibling branches of this routine already log at info.
+                    info!(
+                        "Base key collision detected for {} (msg {}) at retry #{}. \
                          Session hasn't been regenerated. Forcing fresh session.",
                         wacore::types::jid::observe_protocol_address(&signal_address),
+                        message_id,
                         retry_count
                     );
+                    wacore::telemetry::base_key_collision();
                     let _ = device_snapshot
                         .backend
                         .delete_base_key(addr_str, message_id)
@@ -780,8 +801,9 @@ impl Client {
                 }
                 Ok(false) => {
                     info!(
-                        "Base key changed for {} at retry #{} - session regenerated",
+                        "Base key changed for {} (msg {}) at retry #{} - session regenerated",
                         wacore::types::jid::observe_protocol_address(&signal_address),
+                        message_id,
                         retry_count
                     );
                     let _ = device_snapshot
