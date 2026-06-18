@@ -10,6 +10,7 @@
 // recursion limit; matches `src/lib.rs` and the e2e crate.
 #![recursion_limit = "512"]
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -17,13 +18,53 @@ use e2e_tests::{TestClient, text_msg};
 use tokio::sync::Mutex;
 use whatsapp_rust::Jid;
 
+// Deterministic allocator for CodSpeed's memory instrument: `realloc` always
+// allocates a fresh block and copies, never growing in place. Whether the system
+// allocator can grow in place depends on the live heap layout, which differs
+// run-to-run and would otherwise be charged to the benchmark as memory noise (the
+// CodSpeed `reducing-variance` recipe). Bench-only; production keeps the default.
+struct DeterministicAlloc;
+
+unsafe impl GlobalAlloc for DeterministicAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        unsafe {
+            let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
+            let new_ptr = System.alloc(new_layout);
+            if !new_ptr.is_null() {
+                std::ptr::copy_nonoverlapping(ptr, new_ptr, layout.size().min(new_size));
+                System.dealloc(ptr, layout);
+            }
+            new_ptr
+        }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: DeterministicAlloc = DeterministicAlloc;
+
 fn main() {
     divan::main();
 }
 
-// A single multi-thread runtime shared by every bench. Building one per
-// iteration would charge thread-pool startup syscalls to the measured region,
-// and the real client expects a multi-thread scheduler.
+// A single multi-thread runtime pinned to a fixed worker count, shared by every
+// bench. The default worker count tracks the runner's CPU count, so thread stacks and
+// scheduling varied per runner; pinning it makes the benches runner-independent. A
+// fixed count rather than current_thread because the background event drainers
+// (connect_warmed_pair) must keep draining between divan samples to preserve
+// cross-sample isolation, and current_thread freezes spawned tasks outside block_on.
+// Built once so runtime startup isn't charged to the measured region.
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 fn rt() -> &'static tokio::runtime::Runtime {
@@ -34,9 +75,10 @@ fn rt() -> &'static tokio::runtime::Runtime {
             .try_init()
             .ok();
         tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_all()
             .build()
-            .expect("build multi-thread bench runtime")
+            .expect("build bench runtime")
     })
 }
 
