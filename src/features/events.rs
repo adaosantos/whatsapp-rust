@@ -1,6 +1,5 @@
 //! Event creation and response (RSVP).
 
-use anyhow::{Result, anyhow};
 use wacore::event;
 use wacore_binary::{Jid, JidExt};
 use waproto::whatsapp as wa;
@@ -8,7 +7,7 @@ use waproto::whatsapp as wa;
 pub use waproto::whatsapp::message::event_response_message::EventResponseType;
 
 use crate::client::Client;
-use crate::send::SendResult;
+use crate::send::{SendError, SendResult};
 
 /// Parameters for creating an event message. Only `name` is required.
 #[derive(Debug, Clone, Default)]
@@ -38,10 +37,12 @@ impl<'a> Events<'a> {
         &self,
         to: impl Into<Jid>,
         params: EventCreationParams,
-    ) -> Result<(SendResult, Vec<u8>)> {
+    ) -> Result<(SendResult, Vec<u8>), SendError> {
         let to = &to.into();
         if params.name.trim().is_empty() {
-            return Err(anyhow!("Event name must not be empty"));
+            return Err(SendError::InvalidRequest(
+                "event name must not be empty".into(),
+            ));
         }
 
         let mut message = wa::Message {
@@ -77,12 +78,17 @@ impl<'a> Events<'a> {
         message_secret: &[u8],
         response: EventResponseType,
         extra_guest_count: Option<i32>,
-    ) -> Result<SendResult> {
+    ) -> Result<SendResult, SendError> {
         let chat_jid = &chat_jid.into();
-        let my_jid = self
-            .client
-            .get_pn()
-            .ok_or_else(|| anyhow!("Not logged in — cannot determine own JID"))?;
+        // The event secret keys the RSVP's HKDF; a wrong length is caller error,
+        // not an internal failure, so reject it before the encrypt call.
+        if message_secret.len() != 32 {
+            return Err(SendError::InvalidRequest(format!(
+                "event message_secret must be 32 bytes, got {}",
+                message_secret.len()
+            )));
+        }
+        let my_jid = self.client.get_pn().ok_or(SendError::NotLoggedIn)?;
         let my_base = my_jid.to_non_ad();
 
         let responder = self

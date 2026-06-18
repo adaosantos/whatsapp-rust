@@ -289,6 +289,13 @@ impl std::fmt::Display for MemoryDiagnostics {
     }
 }
 
+/// Shared base error for transport/connection concerns.
+///
+/// The DRY foundation every per-domain error builds on (each domain embeds it
+/// via `#[from]`): it carries the cases common to every network operation —
+/// `NotConnected`, `NotLoggedIn`, IQ failures, socket / encrypt-send errors. It
+/// is NOT an umbrella over the whole API; the per-domain typed errors remain
+/// the public return types.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ClientError {
@@ -302,6 +309,13 @@ pub enum ClientError {
     AlreadyConnected,
     #[error("client is not logged in")]
     NotLoggedIn,
+    #[error("IQ request failed: {0}")]
+    Iq(#[from] crate::request::IqError),
+    /// Last-resort catch-all for internal failures threaded through `?` that do
+    /// not (yet) have a dedicated variant. Transparent so the underlying
+    /// error's `Display`/source chain is preserved.
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
 }
 
 impl ClientError {
@@ -309,6 +323,14 @@ impl ClientError {
         match self {
             ClientError::NotConnected => true,
             ClientError::EncryptSend(e) => e.is_transport_unavailable(),
+            // Transport loss can now arrive wrapped in an IQ failure (the base
+            // error gained `Iq`); unwrap it so retry/reconnect still triggers.
+            ClientError::Iq(e) => match e {
+                crate::request::IqError::NotConnected => true,
+                crate::request::IqError::EncryptSend(e) => e.is_transport_unavailable(),
+                crate::request::IqError::ClientState(client) => client.is_transport_unavailable(),
+                _ => false,
+            },
             _ => false,
         }
     }

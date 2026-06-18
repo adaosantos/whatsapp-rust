@@ -11,12 +11,11 @@
 //! dispatched as their inner body `Message`; the parent post key surfaces on
 //! `MessageInfo::comment_target`.
 
-use anyhow::{Result, anyhow};
 use wacore_binary::Jid;
 use waproto::whatsapp as wa;
 
 use crate::client::Client;
-use crate::send::SendResult;
+use crate::send::{SendError, SendResult};
 
 pub struct Comments<'a> {
     client: &'a Client,
@@ -38,7 +37,7 @@ impl<'a> Comments<'a> {
         chat: impl Into<Jid>,
         parent_key: wa::MessageKey,
         text: &str,
-    ) -> Result<SendResult> {
+    ) -> Result<SendResult, SendError> {
         let chat = &chat.into();
         // WA Web encryptExtendedTextComment: the body is an extendedTextMessage.
         let body = wa::Message {
@@ -57,7 +56,7 @@ impl<'a> Comments<'a> {
         chat: impl Into<Jid>,
         mut parent_key: wa::MessageKey,
         body: wa::Message,
-    ) -> Result<SendResult> {
+    ) -> Result<SendResult, SendError> {
         let chat = &chat.into();
         let client = self.client;
         let (author, secret) = client
@@ -66,14 +65,14 @@ impl<'a> Comments<'a> {
         let parent_id = parent_key
             .id
             .clone()
-            .ok_or_else(|| anyhow!("parent message key missing id"))?;
+            .ok_or_else(|| SendError::InvalidRequest("parent message key missing id".into()))?;
         // WA Web comments are authored under the LID identity
         // (getMeLidUserOrThrow); fall back to PN only when no LID is known.
         let commenter = client
             .get_lid()
             .or_else(|| client.get_pn())
             .map(|j| j.to_non_ad())
-            .ok_or_else(|| anyhow!("not logged in"))?;
+            .ok_or(SendError::NotLoggedIn)?;
 
         let (enc_payload, iv) = wacore::comment::encrypt_comment_with_secret(
             &body,
@@ -90,9 +89,9 @@ impl<'a> Comments<'a> {
         }
 
         // Fresh secret so the comment can itself receive encrypted add-ons.
-        let comment_secret: Vec<u8> = {
+        let comment_secret: [u8; 32] = {
             use rand::Rng;
-            let mut secret = vec![0u8; 32];
+            let mut secret = [0u8; 32];
             rand::make_rng::<rand::rngs::StdRng>().fill_bytes(&mut secret);
             secret
         };
@@ -104,7 +103,7 @@ impl<'a> Comments<'a> {
                 enc_iv: Some(iv.to_vec()),
             })),
             message_context_info: Some(Box::new(wa::MessageContextInfo {
-                message_secret: Some(comment_secret.clone()),
+                message_secret: Some(comment_secret.to_vec()),
                 ..Default::default()
             })),
             ..Default::default()
@@ -114,16 +113,12 @@ impl<'a> Comments<'a> {
         // The send path only persists reporting-token secrets, so store the
         // comment's own secret here or we could never decrypt add-ons
         // targeting our own comment.
-        let secret: [u8; 32] = comment_secret
-            .as_slice()
-            .try_into()
-            .expect("comment secret is 32 bytes");
         client
             .persist_outbound_msg_secret(
                 chat,
                 &commenter,
                 &result.message_id,
-                &secret,
+                &comment_secret,
                 wacore::msg_secret::RetentionClass::Text,
             )
             .await;
