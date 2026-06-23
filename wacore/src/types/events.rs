@@ -1,5 +1,5 @@
 use crate::stanza::BusinessSubscription;
-use crate::types::call::IncomingCall;
+use crate::types::call::{IncomingCall, MissedCall};
 use crate::types::message::MessageInfo;
 use crate::types::presence::{ChatPresence, ChatPresenceMedia, ReceiptType};
 use bytes::Bytes;
@@ -232,6 +232,7 @@ pub enum EventKind {
     GroupUpdate,
     ContactUpdate,
     IncomingCall,
+    MissedCall,
     PushNameUpdate,
     SelfPushNameUpdated,
     PinUpdate,
@@ -641,6 +642,11 @@ pub enum Event {
     /// reject, terminate). Mirror of WA Web's inbound call signaling.
     IncomingCall(IncomingCall),
 
+    /// A call that must not ring (e.g. an offer replayed from the offline queue on reconnect).
+    /// Surfaced separately from [`IncomingCall`] so a consumer cannot accidentally auto-accept a
+    /// dead call. Mirror of WA Web's `cancel_call` + `missed_call`.
+    MissedCall(MissedCall),
+
     PushNameUpdate(PushNameUpdate),
     SelfPushNameUpdated(SelfPushNameUpdated),
     PinUpdate(PinUpdate),
@@ -730,6 +736,7 @@ impl Event {
             Event::GroupUpdate(_) => EventKind::GroupUpdate,
             Event::ContactUpdate(_) => EventKind::ContactUpdate,
             Event::IncomingCall(_) => EventKind::IncomingCall,
+            Event::MissedCall(_) => EventKind::MissedCall,
             Event::PushNameUpdate(_) => EventKind::PushNameUpdate,
             Event::SelfPushNameUpdated(_) => EventKind::SelfPushNameUpdated,
             Event::PinUpdate(_) => EventKind::PinUpdate,

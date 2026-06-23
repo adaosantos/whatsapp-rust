@@ -2,9 +2,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use log::{debug, warn};
+#[cfg(feature = "voip")]
+use wacore::stanza::call::{TerminateParams, build_terminate};
 use wacore::stanza::call::{build_offer_ack_receipt, parse_call_stanza};
-use wacore::types::call::{CallAction, IncomingCall};
+use wacore::types::call::{CallAction, IncomingCall, MissedCall, MissedReason};
 use wacore::types::events::Event;
+#[cfg(feature = "voip")]
+use wacore_binary::Jid;
 use wacore_binary::{OwnedNodeRef, Server};
 
 use crate::client::Client;
@@ -37,12 +41,60 @@ impl StanzaHandler for CallHandler {
         let nr = node.get();
         match parse_call_stanza(nr) {
             Ok(Some(call)) => {
-                if matches!(call.action, CallAction::Offer { .. })
-                    && let Err(e) = send_offer_ack_receipt(&client, &call).await
-                {
-                    warn!("call: failed to send offer ack receipt: {e}");
+                // Diagnostic: every recognized <call> action we receive (offer/accept/reject/
+                // terminate/transport/relaylatency...). Lets us see whether the caller actually gets a
+                // peer device's <accept> (which drives the sibling dismiss).
+                debug!(
+                    "call: received {} for {} from {}",
+                    call.action.action_kind(),
+                    call.action.call_id(),
+                    call.from
+                );
+                let is_offer = matches!(call.action, CallAction::Offer { .. });
+                if is_offer && call.offline {
+                    // Offline-queue replay: the call is long dead (no relay, not connectable). Don't
+                    // ack or ring it -- surface a non-ringing missed-call so a consumer can't auto-
+                    // accept it (WA Web's cancel_call + missed_call for offerReceivedWhileOffline).
+                    client
+                        .core
+                        .event_bus
+                        .dispatch(Event::MissedCall(MissedCall::new(
+                            call.from.clone(),
+                            call.action.call_id().to_string(),
+                            call.timestamp,
+                            MissedReason::Offline,
+                        )));
+                } else {
+                    if is_offer && let Err(e) = send_offer_ack_receipt(&client, &call).await {
+                        warn!("call: failed to send offer ack receipt: {e}");
+                    }
+                    // Caller-side: key our recv path to the device that actually answered. We dial the
+                    // base callee LID, but a companion answers from `:N` and encrypts under its own
+                    // device id; without this every inbound frame decrypts to garbage. One-shot, and a
+                    // no-op for an incoming call or a call we aren't the caller of (no sender registered).
+                    #[cfg(feature = "voip")]
+                    if let CallAction::Accept { .. } = &call.action {
+                        client
+                            .call_registry()
+                            .send_rekey(call.action.call_id(), call.from.to_string());
+                    }
+                    // Caller-side multi-device dismiss: when one of the callee's devices accepts or
+                    // rejects an outbound call of ours, tell the rest to stop ringing.
+                    #[cfg(feature = "voip")]
+                    dismiss_outgoing_siblings(&client, &call).await;
+                    // A peer <reject>/<terminate> ends the call: tear down the media task and any
+                    // dormant pending-outgoing entry so CallHandle::wait_ended() resolves, instead of
+                    // leaking the relay/mic task until an unrelated relay timeout. Runs after dismiss
+                    // (which reads the registry entry) and before the move into dispatch.
+                    #[cfg(feature = "voip")]
+                    if matches!(
+                        &call.action,
+                        CallAction::Reject { .. } | CallAction::Terminate { .. }
+                    ) {
+                        crate::voip::facade::terminate_call(&client, call.action.call_id());
+                    }
+                    client.core.event_bus.dispatch(Event::IncomingCall(call));
                 }
-                client.core.event_bus.dispatch(Event::IncomingCall(call));
             }
             Ok(None) => {
                 debug!("call: ignoring unrecognized action (forward-compat)");
@@ -67,6 +119,68 @@ async fn send_offer_ack_receipt(client: &Client, call: &IncomingCall) -> anyhow:
     };
 
     client.send_node(receipt).await.map_err(anyhow::Error::from)
+}
+
+/// Caller-side sibling dismiss. When a callee device accepts/rejects one of OUR outbound calls, the
+/// caller (us) tells the callee's OTHER devices to stop ringing via `<terminate reason=...>` -- the
+/// dismiss is caller-driven (the callee never dismisses its own siblings; verified vs WA Web + APK).
+/// The rung device set lives on the registry session (`take_dismiss_targets`), consumed one-shot so a
+/// duplicate accept/reject can't re-dismiss. No-op for any other action, or a call we aren't the
+/// caller of (inbound call, single-device callee, or one already dismissed). A `Terminate` needs no
+/// handling here: the call ends, its registry entry (and the device set with it) goes away.
+#[cfg(feature = "voip")]
+async fn dismiss_outgoing_siblings(client: &Client, call: &IncomingCall) {
+    let reason = match &call.action {
+        CallAction::Accept { .. } => "accepted_elsewhere",
+        CallAction::Reject { .. } => "rejected_elsewhere",
+        _ => return,
+    };
+    let call_id = call.action.call_id();
+
+    let Some((call_creator, devices)) = client.call_registry().take_dismiss_targets(call_id) else {
+        // Either not our outgoing call, the call already deregistered, the rung set was already
+        // consumed (a duplicate accept), or it rang a single device. If a multi-device callee's
+        // sibling is still ringing and we land here, the rung set wasn't there to dismiss from.
+        debug!("call: {reason} for {call_id}: no sibling-dismiss targets tracked");
+        return;
+    };
+
+    // Send ONE <terminate> per sibling device, addressed to that DEVICE JID with a generated wrapper
+    // id -- the WA Web/APK form. (A single stanza with a <destination> block to the bare peer is NOT
+    // it: WA Web gates the destination fan-out to offer/enc_rekey, and the server routes call
+    // signaling per device.) Skip the device that accepted/rejected: compare on device identity
+    // (user + server + device), not full Jid equality, since the usync device-list and the accept's
+    // `from` can carry a different `agent` for the same physical device.
+    let others: Vec<Jid> = devices
+        .into_iter()
+        .filter(|d| !same_device(d, &call.from))
+        .collect();
+    debug!(
+        "call: {reason} from {} for {call_id}: dismissing {} sibling device(s)",
+        call.from,
+        others.len()
+    );
+    for dev in &others {
+        let id = client.generate_request_id();
+        let node = build_terminate(&TerminateParams {
+            call_id,
+            to: dev,
+            id: Some(&id),
+            call_creator: &call_creator,
+            reason: Some(reason),
+        });
+        match client.send_node(node).await {
+            Ok(()) => debug!("call: dismissed sibling device {dev} ({reason}) for {call_id}"),
+            Err(e) => warn!("call: failed to dismiss sibling device {dev}: {e}"),
+        }
+    }
+}
+
+/// Whether two JIDs name the same device: user + server + device id. Excludes `agent`/`integrator`,
+/// representation details that can differ between the usync device-list and a stanza's `from`.
+#[cfg(feature = "voip")]
+fn same_device(a: &Jid, b: &Jid) -> bool {
+    a.user == b.user && a.server == b.server && a.device == b.device
 }
 
 #[cfg(test)]
@@ -233,5 +347,121 @@ mod tests {
         while let Ok(ev) = rx.try_recv() {
             assert!(!matches!(&*ev, Event::IncomingCall(_)));
         }
+    }
+
+    // Caller-side sibling dismiss: when one callee device accepts our outbound call, the OTHER rung
+    // device gets a per-device `<call to=DEVICE_JID id=..><terminate reason="accepted_elsewhere">`
+    // (no <destination> block), and the rung set is consumed one-shot. A two-device callee keeps the
+    // assertion to a single dismiss stanza the waiter can capture in full.
+    #[cfg(feature = "voip")]
+    #[tokio::test]
+    async fn accept_dismisses_other_callee_device() {
+        let client = make_client().await;
+        let peer = Jid::new("222222222222222", Server::Lid);
+        let creator = Jid::new("111111111111111", Server::Lid);
+        let (sibling, accepting) = (peer.with_device(1), peer.with_device(2));
+
+        // Register the outbound call with its rung device set on the session (as place_call does).
+        let mut session =
+            wacore::voip::CallSession::new_outgoing("CALL-ID-0001", peer.clone(), creator.clone());
+        session.ring_devices = vec![sibling.clone(), accepting.clone()];
+        client.call_registry().insert(session);
+
+        // The `accepting` device accepts.
+        let accept = NodeBuilder::new("call")
+            .attr("from", accepting.clone())
+            .attr("id", "STANZA-ACCEPT")
+            .attr("t", "1766847151")
+            .children([NodeBuilder::new("accept")
+                .attr("call-creator", creator.clone())
+                .attr("call-id", "CALL-ID-0001")
+                .build()])
+            .build();
+
+        let waiter = client.wait_for_sent_node(crate::client::NodeFilter::tag("call"));
+        let mut cancelled = false;
+        assert!(
+            CallHandler
+                .handle(client.clone(), node_to_owned_ref(&accept), &mut cancelled)
+                .await
+        );
+
+        let sent = waiter.await.expect("a dismiss <terminate> must be sent");
+        let r = sent.as_node_ref();
+        // Addressed to the SIBLING device JID (not the bare peer, not the accepting device), with an id.
+        assert_eq!(
+            r.attrs().optional_string("to").as_deref(),
+            Some(sibling.to_string().as_str())
+        );
+        assert!(
+            r.attrs().optional_string("id").is_some(),
+            "wrapper needs an id"
+        );
+        let term = &r.children().unwrap()[0];
+        assert_eq!(term.tag, "terminate");
+        assert_eq!(
+            term.attrs().optional_string("reason").as_deref(),
+            Some("accepted_elsewhere")
+        );
+        assert!(
+            term.get_optional_child("destination").is_none(),
+            "terminate must not use a <destination> block"
+        );
+        assert!(
+            client
+                .call_registry()
+                .take_dismiss_targets("CALL-ID-0001")
+                .is_none(),
+            "the rung device set must be consumed one-shot"
+        );
+    }
+
+    // A peer <terminate> for our call tears it down: the registry entry (and with it the media task)
+    // is removed so CallHandle::wait_ended() resolves, instead of leaking until a relay timeout.
+    #[cfg(feature = "voip")]
+    #[tokio::test]
+    async fn terminate_tears_down_the_call() {
+        let client = make_client().await;
+        let peer = Jid::new("222222222222222", Server::Lid);
+        let creator = Jid::new("111111111111111", Server::Lid);
+        let session =
+            wacore::voip::CallSession::new_outgoing("CALL-ID-0001", peer.clone(), creator.clone());
+        client.call_registry().insert(session);
+        assert!(
+            client
+                .call_registry()
+                .generation_of("CALL-ID-0001")
+                .is_some(),
+            "precondition: the call is registered"
+        );
+
+        let terminate = NodeBuilder::new("call")
+            .attr("from", peer.with_device(1))
+            .attr("id", "STANZA-TERM")
+            .attr("t", "1766847151")
+            .children([NodeBuilder::new("terminate")
+                .attr("call-creator", creator.clone())
+                .attr("call-id", "CALL-ID-0001")
+                .build()])
+            .build();
+
+        let mut cancelled = false;
+        assert!(
+            CallHandler
+                .handle(
+                    client.clone(),
+                    node_to_owned_ref(&terminate),
+                    &mut cancelled
+                )
+                .await
+        );
+
+        assert!(
+            client
+                .call_registry()
+                .generation_of("CALL-ID-0001")
+                .is_none(),
+            "a peer <terminate> must remove the call from the registry"
+        );
     }
 }

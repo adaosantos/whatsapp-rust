@@ -16,6 +16,34 @@ env:
   RUSTC_WRAPPER: "sccache"
 
 jobs:
+  # The "all features" job below compiles the webrtc/opus/mlow tree, which only `voip` pulls in.
+  # Gate its expensive steps on a voip-path match so a non-voip change skips that compile; the job
+  # still runs, so a required status check stays satisfied.
+  changes:
+    name: Detect VoIP changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      voip: ${{ steps.filter.outputs.voip }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            voip:
+              - 'wacore/src/voip/**'
+              - 'src/voip/**'
+              - 'examples/voip.rs'
+              - 'examples/observability.rs'
+              - 'examples/metrics.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'wacore/Cargo.toml'
+              - '.github/workflows/main.yml'
+
   format:
     name: Format Check
     runs-on: ubuntu-latest
@@ -36,6 +64,9 @@ jobs:
         with:
           toolchain: nightly-2026-06-16
           components: clippy
+      # The voip example (built under --all-targets) links cpal, which needs ALSA headers.
+      - name: Install ALSA dev headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Install protoc
         uses: taiki-e/install-action@v2
         with:
@@ -57,6 +88,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-06-16
+      # The voip example (built under --all-targets) links cpal, which needs ALSA headers.
+      - name: Install ALSA dev headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Install protoc
         uses: taiki-e/install-action@v2
         with:
@@ -75,29 +109,49 @@ jobs:
   test-all-features:
     name: Build & Lint (all features)
     runs-on: ubuntu-latest
+    needs: changes
+    # Accepted trade-off: non-voip feature-gated code (tracing / metrics / debug) only gets
+    # --all-features coverage on a voip or manifest PR. Those are optional and compile-time only,
+    # so any breakage surfaces on the next such PR, not at runtime.
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
+        if: needs.changes.outputs.voip == 'true'
         with:
           toolchain: nightly-2026-06-16
+      # The voip example (built under --all-features --all-targets) links cpal,
+      # which needs ALSA on Linux.
+      - name: Install ALSA dev headers
+        if: needs.changes.outputs.voip == 'true'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Install protoc
+        if: needs.changes.outputs.voip == 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: protoc@${{ env.PROTOC_VERSION }}
       - name: Setup sccache
+        if: needs.changes.outputs.voip == 'true'
         uses: mozilla-actions/sccache-action@v0.0.9
       - name: Cache Rust registry
+        if: needs.changes.outputs.voip == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           cache-targets: "false"
       - name: Build (all features)
+        if: needs.changes.outputs.voip == 'true'
         run: cargo build --workspace --exclude e2e-tests --all-features --all-targets --verbose
       - name: Clippy (all features)
+        if: needs.changes.outputs.voip == 'true'
         run: cargo clippy --workspace --exclude e2e-tests --all-features --all-targets -- -D warnings
-      # No `cargo test --all-features` here: `--all-features` turns on
-      # `danger-skip-cert-chain-verify` / `danger-skip-tls-verify`, which disable security
-      # verification (the cert-chain negative test is even `#![cfg]`'d out under it), so the
-      # suite would change behavior rather than catch rot. Build + clippy already cover that goal.
+      # No `cargo test --all-features`: it enables the `danger-skip-*-verify` flags, which disable
+      # security verification (the cert-chain negative test is even cfg'd out), so the suite would
+      # change behavior rather than catch rot; build + clippy cover that. The voip suite runs under
+      # the explicit `voip` feature set instead, never `--all-features`.
+      - name: Test (voip)
+        if: needs.changes.outputs.voip == 'true'
+        run: |
+          cargo test -p wacore --features voip --lib
+          cargo test -p whatsapp-rust --features "voip tokio-native tokio-transport" --lib
 
   test-stable:
     name: Test Stable (no-simd)
