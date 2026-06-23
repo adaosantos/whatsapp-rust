@@ -134,8 +134,14 @@ pub async fn connect_relay_media(
     relay_addr: SocketAddr,
     runtime: Arc<dyn Runtime>,
 ) -> Result<RelayMediaChannel> {
-    // 1. UDP socket connected to the relay.
-    let udp = UdpSocket::bind("0.0.0.0:0").await.context("bind udp")?;
+    // 1. UDP socket connected to the relay. Bind in the relay's address family so an IPv6 relay is
+    //    reachable (WA relays are IPv4 today, but the unspecified bind must match to connect).
+    let bind_addr = if relay_addr.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
+    let udp = UdpSocket::bind(bind_addr).await.context("bind udp")?;
     udp.connect(relay_addr)
         .await
         .context("connect udp to relay")?;
@@ -751,7 +757,11 @@ mod udp_relay_e2e {
             // task ends. Join it so a stuck relay surfaces here rather than leaking past the test.
             drop(mic_tx);
             driver.abort();
-            let _ = tokio::time::timeout(Duration::from_secs(5), relay_task).await;
+            // Surface a relay-task panic instead of swallowing it (the outer 30s timeout bounds a
+            // truly stuck join).
+            if let Ok(joined) = tokio::time::timeout(Duration::from_secs(5), relay_task).await {
+                joined.expect("relay task panicked after teardown");
+            }
         };
 
         // Bound the whole test so a stuck DTLS/SCTP handshake fails fast instead of blocking CI.

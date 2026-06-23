@@ -48,7 +48,7 @@ impl StanzaHandler for CallHandler {
                     "call: received {} for {} from {}",
                     call.action.action_kind(),
                     call.action.call_id(),
-                    call.from
+                    call.from.observe()
                 );
                 let is_offer = matches!(call.action, CallAction::Offer { .. });
                 if is_offer && call.offline {
@@ -157,7 +157,7 @@ async fn dismiss_outgoing_siblings(client: &Client, call: &IncomingCall) {
         .collect();
     debug!(
         "call: {reason} from {} for {call_id}: dismissing {} sibling device(s)",
-        call.from,
+        call.from.observe(),
         others.len()
     );
     for dev in &others {
@@ -170,8 +170,14 @@ async fn dismiss_outgoing_siblings(client: &Client, call: &IncomingCall) {
             reason: Some(reason),
         });
         match client.send_node(node).await {
-            Ok(()) => debug!("call: dismissed sibling device {dev} ({reason}) for {call_id}"),
-            Err(e) => warn!("call: failed to dismiss sibling device {dev}: {e}"),
+            Ok(()) => debug!(
+                "call: dismissed sibling device {} ({reason}) for {call_id}",
+                dev.observe()
+            ),
+            Err(e) => warn!(
+                "call: failed to dismiss sibling device {}: {e}",
+                dev.observe()
+            ),
         }
     }
 }

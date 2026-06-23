@@ -105,10 +105,17 @@ fn parse_media_offer(
             if let Some(enc_node) = to.get_optional_child("enc")
                 && let Some(enc) = parse_offer_enc(enc_node)
             {
-                let to_jid = to
+                // A <to> destination must carry a parseable jid; skip a malformed one rather than
+                // pushing `to: None`, which is the bare-<enc> (directly-addressed) sentinel.
+                if let Some(to_jid) = to
                     .get_attr("jid")
-                    .and_then(|v| v.as_str().parse::<Jid>().ok());
-                encs.push(OfferRecipientEnc { to: to_jid, enc });
+                    .and_then(|v| v.as_str().parse::<Jid>().ok())
+                {
+                    encs.push(OfferRecipientEnc {
+                        to: Some(to_jid),
+                        enc,
+                    });
+                }
             }
         }
     }
@@ -1278,10 +1285,10 @@ mod tests {
     // --- Outbound signaling builder tests ---
 
     fn peer() -> Jid {
-        Jid::new("214482127208608", Server::Lid)
+        Jid::new("111111111111111", Server::Lid)
     }
     fn creator() -> Jid {
-        Jid::new("243426515787784", Server::Lid).with_device(19)
+        Jid::new("222222222222222", Server::Lid).with_device(19)
     }
 
     fn child_tags(call: &Node) -> Vec<String> {

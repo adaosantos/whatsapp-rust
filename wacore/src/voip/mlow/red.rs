@@ -26,9 +26,10 @@ pub(crate) enum RedError {
 }
 
 /// Parse a SplitRed RED packet into its frames (redundant blocks in header order, then the main
-/// frame last). Errors on malformed inputs (including a bare MLow frame whose high-bit-set first
-/// byte makes it un-parseable as SplitRed). Only call when RED was negotiated; for a bare-frame
-/// stream feed the whole RTP payload as one MLow frame.
+/// frame last). Errors on malformed RED inputs. Only call when RED was negotiated: a bare MLow
+/// frame would be misparsed here (an active-voice TOC like 0x50 has its high bit clear and reads as
+/// a 0-redundancy main marker, not an error), so for a bare-frame stream feed the whole RTP payload
+/// as one MLow frame instead.
 pub(crate) fn depack_split_red(p: &[u8]) -> Result<Vec<MlowFrame<'_>>, RedError> {
     let n = p.len();
     if n == 0 {

@@ -490,10 +490,11 @@ fn chirp_tracks_frequency() {
     let late_start = (N_FRAMES - 3) * FRAME;
     let late_end = N_FRAMES * FRAME;
 
-    if out.len() < late_end {
-        // not enough decoded output; skip rather than panic
-        return;
-    }
+    assert!(
+        out.len() >= late_end,
+        "decoded output too short ({} < {late_end}); the chirp decode regressed",
+        out.len()
+    );
     let dom_early = find_dom_freq(&out[early_start..early_end]);
     let dom_late = find_dom_freq(&out[late_start..late_end]);
 
@@ -624,11 +625,17 @@ fn decoder_tracks_energy_envelope() {
                 ref_r / rust_r.max(1e-9)
             );
             failures += 1;
+        } else if rust_r > ref_r * 10.0 {
+            eprintln!(
+                "  active frame {i}: ref RMS={ref_r:.4} Rust RMS={rust_r:.6} (Rust {:.1}x louder)",
+                rust_r / ref_r.max(1e-9)
+            );
+            failures += 1;
         }
     }
     assert!(
         failures == 0,
-        "{failures}/{} active frames: Rust decoder RMS is >10x below the reference",
+        "{failures}/{} active frames: Rust decoder RMS is >10x off the reference (either direction)",
         active_pairs.len()
     );
 }

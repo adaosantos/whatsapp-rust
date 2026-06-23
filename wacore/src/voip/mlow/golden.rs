@@ -83,13 +83,13 @@ fn digest(out: &[i16]) -> Digest {
 // Golden digest of the validated codec (regenerate with VOIP_GOLDEN=1; see module docs). The
 // scalars are tolerant and platform-robust; the checksum is exact and stable on the CI target.
 const GOLDEN_SAMPLES: usize = 23040;
-const GOLDEN_RMS: f32 = 0.150191;
-const GOLDEN_PEAK: f32 = 0.466888;
+const GOLDEN_RMS: f32 = 0.154699;
+const GOLDEN_PEAK: f32 = 0.458405;
 const GOLDEN_CLIP: f32 = 0.0;
-const GOLDEN_CHECKSUM: u64 = 0x5b5d_3946_6e40_7596;
+const GOLDEN_CHECKSUM: u64 = 0x8782_cb8c_d7b5_f262;
 // Pins the ENCODER bitstream independently of the decoder: fnv1a over the concatenation of every
 // emitted packet's wire bytes. Drift here means the encoder changed even if decode output did not.
-const GOLDEN_FRAMES_CHECKSUM: u64 = 0x95be_8b1e_11ef_3f9e;
+const GOLDEN_FRAMES_CHECKSUM: u64 = 0xb179_3f10_72d1_5a7d;
 
 #[test]
 fn golden_roundtrip_no_regression() {

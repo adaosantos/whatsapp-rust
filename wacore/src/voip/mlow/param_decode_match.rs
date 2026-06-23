@@ -27,6 +27,11 @@ fn nrgres_fcbg_match_c_reference() {
             c,
         );
     }
+    assert_eq!(
+        cmap.len(),
+        carr.len(),
+        "duplicate (packet, frame, sf) keys in the C param dump would hide coverage"
+    );
 
     let rust = diag_decode_params();
     let (mut uv_nrgres, mut uv_fcbg, mut v_fcbg, mut voiced_class) = (0, 0, 0, 0);

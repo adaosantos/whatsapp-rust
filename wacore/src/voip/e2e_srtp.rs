@@ -14,11 +14,18 @@ type AesCtr = Ctr128BE<Aes128>;
 /// Session keys for the E2E 1:1 SRTP cipher. Doc-hidden: an internal primitive, surfaced only so
 /// the in-tree benchmark crate can drive `crypt_payload`/`derive_e2e_keys`.
 #[doc(hidden)]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct E2eSrtpKeys {
     pub cipher_key: [u8; 16],
     pub salt: [u8; 14],
     pub auth_key: [u8; 20],
+}
+
+// Manual Debug so a stray `{:?}` can't leak the session keys.
+impl core::fmt::Debug for E2eSrtpKeys {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("E2eSrtpKeys([redacted])")
+    }
 }
 
 /// AES-CM PRF (libsrtp KDF): IV = master_salt (14B) with `label` XORed into byte 7,

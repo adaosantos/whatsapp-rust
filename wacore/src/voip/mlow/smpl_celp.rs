@@ -608,9 +608,10 @@ fn smpl_syn_ltp_basis(
                     state[p + nn] = ret;
                 }
             }
-            // last = dot(p[39 - i_lag - 8 ..], kernel, 16)
+            // last = dot(p[SMPL_LAG_SUBFRLEN - i_lag - 8 ..], kernel, 16). No -1: matches the C
+            // reference (smpl_celp_util.c uses i==SMPL_LAG_SUBFRLEN) and our own decoder basis.
             let base_last =
-                (p as i32) + (SMPL_LAG_SUBFRLEN as i32 - 1 - il - SMPL_LTP_INTERPOL_DELAY as i32);
+                (p as i32) + (SMPL_LAG_SUBFRLEN as i32 - il - SMPL_LTP_INTERPOL_DELAY as i32);
             let last = smpl_dot_prod(
                 &state[base_last as usize..],
                 &SMPL_INTERPOL_KERNEL,

@@ -17,18 +17,31 @@ const LABEL_RTP_AUTH: u8 = 0x01;
 const LABEL_RTP_SALT: u8 = 0x02;
 
 /// 16B master key + 14B master salt.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SrtpKeyingMaterial {
     pub master_key: [u8; 16],
     pub master_salt: [u8; 14],
 }
 
+// Manual Debug so a stray `{:?}` can't leak key material.
+impl core::fmt::Debug for SrtpKeyingMaterial {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SrtpKeyingMaterial([redacted])")
+    }
+}
+
 /// Expanded per-session keys (AES_CM_128_HMAC_SHA1_80).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LibsrtpSessionKeys {
     pub session_key: [u8; 16],
     pub session_salt: [u8; 14],
     pub auth_key: [u8; 20],
+}
+
+impl core::fmt::Debug for LibsrtpSessionKeys {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("LibsrtpSessionKeys([redacted])")
+    }
 }
 
 fn keying_from_crypto_key(crypto_key: &[u8]) -> SrtpKeyingMaterial {

@@ -66,6 +66,11 @@ impl WaOpusEncoder {
 
     /// Encode one mono frame of `WA_FRAME_SAMPLES` 16-bit samples to Opus.
     pub fn encode(&mut self, pcm: &[i16]) -> Result<Vec<u8>> {
+        debug_assert_eq!(
+            pcm.len(),
+            WA_FRAME_SAMPLES,
+            "WaOpusEncoder expects exactly one {WA_FRAME_SAMPLES}-sample frame"
+        );
         self.enc
             .encode_vec(pcm, pcm.len() * 2 + 64)
             .map_err(|e| anyhow!("opus encode: {e}"))

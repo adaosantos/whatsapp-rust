@@ -601,7 +601,9 @@ impl RangeEncoder {
     }
 
     /// Meaningful body length = front (range) bytes + back (raw-bit) bytes; the gap between is
-    /// zero-fill padding that `done()` wrote.
+    /// zero-fill padding that `done()` wrote. The smpl encode path issues no back-bit ops, so
+    /// `end_offs` stays 0 and this is just the front length; if a back-bit op is ever added, the
+    /// front/back layout must be compacted (per the C `ec_enc_shrink`) before this stays correct.
     pub(crate) fn consumed_len(&self) -> usize {
         (self.offs + self.end_offs) as usize
     }

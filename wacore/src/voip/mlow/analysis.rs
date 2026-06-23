@@ -1070,7 +1070,7 @@ fn smpl_analyze_internal(
 
     let (chosen, chosen_lstate, is_voiced) = match voiced {
         Some(vd) => {
-            let cand = smpl_voiced_candidate(synth_t, win, prev_nlsf, fe, cs, &vd);
+            let cand = smpl_voiced_candidate(synth_t, win_n, prev_nlsf, fe, cs, &vd);
             (cand, Some(voiced_lstate), true)
         }
         None => (
@@ -1165,14 +1165,14 @@ fn smpl_voiced_decision_for_lag(
 /// excitation instead of the prior gainless greedy approximation.
 fn smpl_voiced_candidate(
     synth_t: &SmplSynthTables,
-    win: &[f64],
+    // Use the caller's window WITH the 32-sample CELP pre-lead (same as the unvoiced path), matching
+    // the C: both voiced and unvoiced take the LPC residual from the same pre-lead window.
+    win_n: &[f32],
     prev_nlsf: &[f32],
     fe: &FrontEndLsf,
     cs: &mut CelpFrameCtx,
     vd: &VoicedDecision,
 ) -> Candidate {
-    let win_n: Vec<f32> = win.iter().map(|&v| (v / 32768.0) as f32).collect();
-
     let gain_q = [0i32; 4]; // voiced synthesis uses the ACB+FCB excitation, not a gains block
 
     // Voiced-grid LSF: bit-exact C quantizer fed the faithful front-end NLSF (voiced codebook).
@@ -1182,7 +1182,7 @@ fn smpl_voiced_candidate(
     let (predcoefs, _ilsf) = super::smpl_lpc::smpl_lpc_interpol(&brec, fe.prev_lsfq, smpl_nlsf2a);
     let mut res_lpc = vec![0f32; SMPL_INTF_LEN];
     for sf in 0..SMPL_SUBFR_COUNT {
-        let r = smpl_analysis_residual_subfr(&predcoefs[sf], &win_n, sf);
+        let r = smpl_analysis_residual_subfr(&predcoefs[sf], win_n, sf);
         res_lpc[sf * SMPL_SUBFR_LEN..(sf + 1) * SMPL_SUBFR_LEN].copy_from_slice(&r);
     }
 
