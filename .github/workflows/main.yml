@@ -36,6 +36,10 @@ jobs:
             voip:
               - 'wacore/src/voip/**'
               - 'src/voip/**'
+              # The voip media facade reuses ungated helpers from the send layer
+              # (encrypt_for_devices_with_sessions_raw, SessionPlan::assume_ready),
+              # so a send-only change can break the --features voip build.
+              - 'wacore/src/send/**'
               - 'examples/voip.rs'
               - 'examples/observability.rs'
               - 'examples/metrics.rs'
