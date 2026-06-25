@@ -933,25 +933,40 @@ async fn attach_engine(
     // `ended`; selecting on it drops the in-flight connect future to abort the unwanted DTLS/SCTP dial
     // instead of letting it run to success or the 12s timeout while wait_ended() stays parked.
     let dial = factory.connect();
-    let (transport, relay_events) =
-        match futures::future::select(dial, std::pin::pin!(ended.wait())).await {
-            futures::future::Either::Left((Ok(pair), _)) => pair,
-            futures::future::Either::Left((Err(e), _)) => {
-                client
-                    .call_registry()
-                    .remove_if_current(call_id, generation);
-                ended.notify();
-                return Err(CallError::Connect(e.to_string()));
-            }
-            // Ended mid-dial: the loser `dial` future drops here, aborting the connect. The generation was
-            // already reaped by whoever ended us (`ended` is already set); reap defensively and stop.
-            futures::future::Either::Right(((), _dial)) => {
-                client
-                    .call_registry()
-                    .remove_if_current(call_id, generation);
-                return Err(CallError::Connect("call ended during relay connect".into()));
-            }
-        };
+    // Stop the dial as soon as the call ends OR the connection drops. A disconnect runs
+    // `abort_all()`, which clears our still-task-less registry entry WITHOUT touching `ended` (the
+    // notify lives on the media task's drop-guard, not built yet here), and for an outgoing call the
+    // PendingOutgoing was already drained -- so without the shutdown arm a disconnect mid-dial would
+    // leave wait_ended() parked until connect() hit its own ~12s timeout.
+    let shutdown = client.connection_shutdown_signal();
+    let stop = async {
+        futures::future::select(
+            std::pin::pin!(ended.wait()),
+            std::pin::pin!(wacore::runtime::wait_for_shutdown(&shutdown)),
+        )
+        .await;
+    };
+    let (transport, relay_events) = match futures::future::select(dial, std::pin::pin!(stop)).await
+    {
+        futures::future::Either::Left((Ok(pair), _)) => pair,
+        futures::future::Either::Left((Err(e), _)) => {
+            client
+                .call_registry()
+                .remove_if_current(call_id, generation);
+            ended.notify();
+            return Err(CallError::Connect(e.to_string()));
+        }
+        // Ended or disconnected mid-dial: the loser `dial` future drops here, aborting the connect.
+        // Reap our generation and notify `ended` (idempotent) -- for the disconnect case `ended` was
+        // not set by abort_all, so this is what resolves a parked wait_ended().
+        futures::future::Either::Right(((), _dial)) => {
+            client
+                .call_registry()
+                .remove_if_current(call_id, generation);
+            ended.notify();
+            return Err(CallError::Connect("call ended during relay connect".into()));
+        }
+    };
 
     // The shared mute flag the mic feed checks: muted frames become exact-zero (the engine sends a
     // cheap DTX comfort-noise frame for an all-zero frame, so the relay stream never gaps).
@@ -2237,6 +2252,73 @@ mod tests {
             client.call_registry().active_count(),
             0,
             "hangup must leave no stale registry entry"
+        );
+    }
+
+    // A disconnect during the connect window must abort the dial and resolve wait_ended(). The
+    // task-less registry entry is cleared by abort_all() without touching `ended`, so the dial is
+    // raced against the per-connection shutdown signal; without that arm wait_ended() would park
+    // until connect() hit its own timeout.
+    #[tokio::test]
+    async fn disconnect_during_connect_window_resolves_wait_ended_and_aborts_dial() {
+        let client = make_client().await;
+        let (_gate_tx, gate_rx) = async_channel::bounded::<()>(1);
+        let (_relay_tx, relay_rx) = async_channel::unbounded();
+        let factory = Arc::new(GatedFactory {
+            gate: gate_rx,
+            relay_rx: Mutex::new(Some(relay_rx)),
+            sent: Arc::new(Mutex::new(Vec::new())),
+        });
+        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
+        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
+
+        let generation = client.call_registry().insert(mk_session());
+        let muted = Arc::new(AtomicBool::new(false));
+        let ended = Arc::new(EndedFlag::default());
+        let (ev_tx, _ev_rx) = async_channel::unbounded::<CallEvent>();
+
+        let attach = tokio::spawn({
+            let client = client.clone();
+            let factory = factory.clone();
+            let ended = ended.clone();
+            async move {
+                attach_engine(
+                    &client,
+                    "CID-FACADE",
+                    generation,
+                    engine(),
+                    &*factory,
+                    Arc::new(mic_rx),
+                    Arc::new(spk_tx),
+                    muted,
+                    ended,
+                    ev_tx,
+                    None,
+                )
+                .await
+            }
+        });
+        // Let attach_engine subscribe to the shutdown signal and park in the gated connect.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        // Simulate the connection dropping: abort_all clears the task-less entry, then the shutdown
+        // signal fires (the order cleanup_connection_state uses).
+        client.call_registry().abort_all();
+        client.notify_connection_shutdown();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), ended.wait())
+            .await
+            .expect(
+                "a disconnect in the connect window must wake `ended` without the dial completing",
+            );
+
+        let res = tokio::time::timeout(std::time::Duration::from_secs(2), attach)
+            .await
+            .expect("attach_engine must return once the disconnect aborts the dial")
+            .expect("attach task");
+        assert!(
+            matches!(res, Err(CallError::Connect(_))),
+            "an aborted dial surfaces a Connect error"
         );
     }
 
