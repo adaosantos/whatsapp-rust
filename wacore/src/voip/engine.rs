@@ -88,7 +88,7 @@ impl TxIdSource for SequentialTxIds {
 
 /// Everything the engine needs to be self-contained for one call. The relay fields come from the
 /// parsed `<relay>` stanza; the crypto fields from the decrypted callKey and our/our-peer LIDs.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CallConfig {
     pub call_id: String,
     pub direction: CallDirection,
@@ -118,6 +118,29 @@ pub struct CallConfig {
     /// the peer accepts, matching the pre-refactor pipeline (`MediaPipeline`: "SFrame is omitted,
     /// default-off on send"). Send-side SFrame is intentionally not wired.
     pub enable_sframe: bool,
+}
+
+// Manual Debug so a stray `{:?}` can't leak the SRTP callKey or the STUN integrity key, matching the
+// redaction the sibling key structs already apply (E2eSrtpKeys, SrtpKeyingMaterial).
+impl core::fmt::Debug for CallConfig {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CallConfig")
+            .field("call_id", &self.call_id)
+            .field("direction", &self.direction)
+            .field("self_lid", &self.self_lid)
+            .field("peer_lid", &self.peer_lid)
+            .field("call_key", &"[redacted]")
+            .field("ssrc", &self.ssrc)
+            .field("samples_per_packet", &self.samples_per_packet)
+            .field("relay_token", &self.relay_token)
+            .field("relay_ip", &self.relay_ip)
+            .field("relay_port", &self.relay_port)
+            .field("integrity_key", &"[redacted]")
+            .field("warp_mi_tag_len", &self.warp_mi_tag_len)
+            .field("enable_media", &self.enable_media)
+            .field("enable_sframe", &self.enable_sframe)
+            .finish()
+    }
 }
 
 /// Why the engine could not be constructed.
@@ -194,7 +217,10 @@ impl CallConfig {
             relay_ip,
             relay_port,
             integrity_key,
-            warp_mi_tag_len: relay.warp_mi_tag_len.map(|n| n as usize).unwrap_or(4),
+            warp_mi_tag_len: relay
+                .warp_mi_tag_len
+                .map(|n| n as usize)
+                .unwrap_or(super::warp::WARP_MI_TAG_LEN),
             enable_media: true,
             enable_sframe: true,
         })
@@ -730,6 +756,26 @@ mod tests {
             enable_media,
             enable_sframe: false,
         }
+    }
+
+    // The SRTP callKey and the STUN integrity key must never reach a `{:?}` dump, matching the
+    // redaction on the sibling key structs. Pins the manual Debug against a `#[derive(Debug)]` regression.
+    #[test]
+    fn call_config_debug_redacts_key_material() {
+        let dbg = format!("{:?}", config(true));
+        assert!(
+            dbg.contains("call_key: \"[redacted]\""),
+            "callKey not redacted"
+        );
+        assert!(
+            dbg.contains("integrity_key: \"[redacted]\""),
+            "integrity_key not redacted"
+        );
+        // The 0..32 callKey bytes and the b"relay-key" integrity-key bytes must not appear.
+        assert!(!dbg.contains("[0, 1, 2, 3"), "callKey bytes leaked");
+        assert!(!dbg.contains("114, 101, 108"), "integrity_key bytes leaked");
+        // Non-secret fields stay visible for diagnostics.
+        assert!(dbg.contains("call_id: \"CID\""));
     }
 
     fn engine(enable_media: bool) -> CallEngine {

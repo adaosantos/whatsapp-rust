@@ -81,9 +81,7 @@ impl<'a> AcceptCall<'a> {
         // meanwhile, cleanup_connection_state already ran with no registry entry to abort, so bail
         // rather than register + connect a relay that would outlive the connection.
         if !self.client.is_connected() {
-            return Err(CallError::Connect(
-                "connection dropped during call setup".into(),
-            ));
+            return Err(CallError::Connect(ERR_DISCONNECTED_DURING_SETUP.into()));
         }
         // The relay endpoint comes from the offer's relay block; resolve the socket addr to dial.
         let addr = self.relay_addr()?;
@@ -552,7 +550,7 @@ async fn place_call(
 
     let muted = Arc::new(AtomicBool::new(false));
     let ended = Arc::new(EndedFlag::default());
-    let (ev_tx, ev_rx) = async_channel::unbounded::<CallEvent>();
+    let (ev_tx, ev_rx) = async_channel::bounded::<CallEvent>(CALL_EVENT_CHANNEL_CAPACITY);
 
     // Recv-rekey channel, created now (not at engine build) so a `<accept>` that races ahead of the
     // relay still lands: the sender lives on the registry from this point; the receiver is parked on
@@ -586,20 +584,7 @@ async fn place_call(
     // registry generation, drop the dangling ack-waiter, and wake any wait_ended() waiter, then
     // propagate. Guarded so a same-call-id replacement that already superseded us isn't evicted.
     if let Err(e) = client.send_node(offer).await {
-        let removed = {
-            let mut map = client
-                .pending_outgoing_calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if map
-                .get(&call_id)
-                .is_some_and(|p| p.generation == generation)
-            {
-                map.remove(&call_id)
-            } else {
-                None
-            }
-        };
+        let removed = take_pending_if_current(&client.pending_outgoing_calls, &call_id, generation);
         registry.remove_if_current(&call_id, generation);
         // No ack will ever arrive for the failed offer; drop the waiter so it can't leak.
         client
@@ -631,6 +616,19 @@ async fn place_call(
 
 /// Time to wait for the server's `<ack type=offer>` carrying the relay before giving up.
 const OFFER_ACK_RELAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Pre-encode mic-frame backlog before the channel back-pressures the source (8 × 20 ms = 160 ms).
+const MIC_CHANNEL_CAPACITY: usize = 8;
+
+/// Bound on the consumer-facing `CallEvent` queue. The driver posts with `try_send`, so once a slow
+/// or absent consumer lets it fill, further events drop instead of growing without bound: an
+/// authenticated peer streaming `ForeignAudio` frames can't drive an OOM. Lifecycle events
+/// (RelayAllocated/Failed/TimedOut) are emitted before any media flows, so they are never dropped,
+/// and call teardown is driven by the `ended` flag, not this channel.
+const CALL_EVENT_CHANNEL_CAPACITY: usize = 64;
+
+/// Returned by `CallError::Connect` when the socket drops mid-setup, before the engine is attached.
+const ERR_DISCONNECTED_DURING_SETUP: &str = "connection dropped during call setup";
 
 /// Spawn the task that turns the offer's `<ack>` into a connected media engine: await the ack-waiter
 /// (bounded), and on a node carrying a `<relay>` attach the engine via [`attach_outgoing_relay`]
@@ -691,18 +689,24 @@ fn spawn_outgoing_relay_waiter(
 /// Tear down a still-dormant outgoing call that never got its relay: drop the (generation-guarded)
 /// pending entry, reap the registry generation, and notify its `ended` so wait_ended() resolves. A
 /// no-op if the call was already hung up or superseded.
+/// Remove the pending-outgoing entry for `call_id` only if it is still on `generation`. A same-call-id
+/// replacement that already superseded it keeps its entry. The generation guard must stay in lockstep
+/// across every removal site, so it lives here rather than being re-inlined.
+fn take_pending_if_current(
+    pending: &std::sync::Mutex<std::collections::HashMap<String, PendingOutgoing>>,
+    call_id: &str,
+    generation: u64,
+) -> Option<PendingOutgoing> {
+    let mut map = pending.lock().unwrap_or_else(|e| e.into_inner());
+    if map.get(call_id).is_some_and(|p| p.generation == generation) {
+        map.remove(call_id)
+    } else {
+        None
+    }
+}
+
 fn fail_pending_outgoing(client: &Client, call_id: &str, generation: u64) {
-    let pending = {
-        let mut map = client
-            .pending_outgoing_calls
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if map.get(call_id).is_some_and(|p| p.generation == generation) {
-            map.remove(call_id)
-        } else {
-            None
-        }
-    };
+    let pending = take_pending_if_current(&client.pending_outgoing_calls, call_id, generation);
     client
         .call_registry()
         .remove_if_current(call_id, generation);
@@ -860,7 +864,7 @@ async fn spawn_call(
 
     let muted = Arc::new(AtomicBool::new(false));
     let ended = Arc::new(EndedFlag::default());
-    let (ev_tx, ev_rx) = async_channel::unbounded::<CallEvent>();
+    let (ev_tx, ev_rx) = async_channel::bounded::<CallEvent>(CALL_EVENT_CHANNEL_CAPACITY);
     attach_engine(
         client,
         &call_id,
@@ -916,9 +920,7 @@ async fn attach_engine(
             .call_registry()
             .remove_if_current(call_id, generation);
         ended.notify();
-        return Err(CallError::Connect(
-            "connection dropped during call setup".into(),
-        ));
+        return Err(CallError::Connect(ERR_DISCONNECTED_DURING_SETUP.into()));
     }
 
     // Connect failure leaves the call already visible (registry entry inserted before connect; for an
@@ -953,7 +955,7 @@ async fn attach_engine(
 
     // The shared mute flag the mic feed checks: muted frames become exact-zero (the engine sends a
     // cheap DTX comfort-noise frame for an all-zero frame, so the relay stream never gaps).
-    let (mic_tx, mic_rx) = async_channel::bounded::<Vec<i16>>(8);
+    let (mic_tx, mic_rx) = async_channel::bounded::<Vec<i16>>(MIC_CHANNEL_CAPACITY);
     let mute_feed = MuteFeed {
         src: source.frames(),
         out: mic_tx,
@@ -1104,20 +1106,8 @@ impl CallHandle {
         // A DORMANT outgoing call (relay not yet arrived, no engine task) still has its relay-attach
         // material parked here. Drop it so it can't leak or later resurrect, guarded by generation so
         // a superseded handle doesn't evict a live replacement's pending entry.
-        let removed_pending = {
-            let mut map = self
-                .pending_outgoing_calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if map
-                .get(&self.call_id)
-                .is_some_and(|p| p.generation == self.generation)
-            {
-                map.remove(&self.call_id)
-            } else {
-                None
-            }
-        };
+        let removed_pending =
+            take_pending_if_current(&self.pending_outgoing_calls, &self.call_id, self.generation);
 
         // The call's `ring_devices` (sibling-dismiss tracking) live on the registry session, so the
         // `remove_if_current` above already dropped them -- no separate map to clear.

@@ -1,4 +1,9 @@
 //! WARP RTP extension constants and the WARP MESSAGE-INTEGRITY tag.
+//!
+//! wacrg spec: warp-crypto (CRY-07), warp relay framing (REL-03). The MI tag is keyed
+//! by the per-participant SRTP auth key (KAT-pinned), NOT a separate callKey-derived
+//! "warp auth key" as the spec's `derive_warp_auth_key` documents; don't "fix" it
+//! toward the spec without re-checking the vectors.
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;

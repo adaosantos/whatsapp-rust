@@ -5,6 +5,8 @@ use crate::voip::warp::audio_piggyback_extension_for;
 
 pub const RTP_PAYLOAD_TYPE_OPUS: u8 = 120;
 pub const WHATSAPP_RTP_EXTENSION_PROFILE: u16 = 0xdebe;
+/// RFC 3550 fixed RTP header length, before any CSRC list or extension block.
+pub const RTP_FIXED_HEADER_LEN: usize = 12;
 pub const WHATSAPP_RTP_HEADER_SIZE: usize = 16;
 pub const WHATSAPP_RTP_HEADER_DTX_SIZE: usize = 20;
 pub const WHATSAPP_RTP_EXTENSION_DTX_WORD: u32 = 0x3001_0000;
@@ -100,14 +102,14 @@ impl RtpHeader {
 
 /// Full on-wire RTP header size (fixed 12 + CSRC + optional extension block), or `None`.
 pub fn rtp_header_byte_length(data: &[u8]) -> Option<usize> {
-    if data.len() < 12 {
+    if data.len() < RTP_FIXED_HEADER_LEN {
         return None;
     }
     if (data[0] >> 6) & 0x03 != RTP_VERSION {
         return None;
     }
     let cc = (data[0] & 0x0f) as usize;
-    let mut header_len = 12 + cc * 4;
+    let mut header_len = RTP_FIXED_HEADER_LEN + cc * 4;
     if data.len() < header_len {
         return None;
     }
@@ -126,7 +128,7 @@ pub fn rtp_header_byte_length(data: &[u8]) -> Option<usize> {
 }
 
 pub fn is_rtp_version2(data: &[u8]) -> bool {
-    data.len() >= 12 && (data[0] >> 6) & 0x03 == RTP_VERSION
+    data.len() >= RTP_FIXED_HEADER_LEN && (data[0] >> 6) & 0x03 == RTP_VERSION
 }
 
 /// Parse the fixed RTP header fields (the extension word is not decoded).
@@ -146,7 +148,7 @@ pub fn encode_rtp_header(header: &RtpHeader) -> Vec<u8> {
     let size = header.byte_size();
     let mut buf = vec![0u8; size];
     buf[0] = RTP_VERSION << 6;
-    if size > 12 {
+    if size > RTP_FIXED_HEADER_LEN {
         buf[0] |= 0x10; // X=1 (WhatsApp 0xdebe extension)
     }
     buf[1] = ((header.marker as u8) << 7) | (header.payload_type & 0x7f);

@@ -4,6 +4,8 @@
 //!   1. GCM nonce = 8 zero bytes || counter as u64 LITTLE-endian (16-byte nonce, GHASH-derived J0).
 //!   2. The SFrame header is appended AFTER the ciphertext+tag and is NOT GCM AAD.
 //!   3. Wire layout is `[ciphertext || 16-byte tag || varint-header]`.
+//!
+//! wacrg spec: sframe-media (CRY-04).
 
 use aes_gcm::aes::Aes128;
 use aes_gcm::aes::cipher::consts::U16;

@@ -1,6 +1,9 @@
 //! Parse the `<relay>` block from a call ack into [`RelayData`] (hbh_key, relay key,
 //! indexed tokens, te2 endpoints) and select outbound relay candidates.
+//!
+//! wacrg spec: relay-candidates (REL-01), stun-relay (REL-02).
 
+use crate::voip::hbh_srtp::HBH_KEY_LEN;
 use base64::prelude::*;
 use std::collections::HashMap;
 use wacore_binary::NodeRef;
@@ -79,13 +82,13 @@ pub fn decode_hbh_key(bytes: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let mut decoded = try_decode_base64(bytes).unwrap_or_else(|| bytes.to_vec());
-    if decoded.len() != 30
+    if decoded.len() != HBH_KEY_LEN
         && let Some(inner) = try_decode_base64(&decoded)
-        && inner.len() == 30
+        && inner.len() == HBH_KEY_LEN
     {
         decoded = inner;
     }
-    (decoded.len() == 30).then_some(decoded)
+    (decoded.len() == HBH_KEY_LEN).then_some(decoded)
 }
 
 /// Decode `<key>` to its raw bytes (16B for STUN MI), falling back to the input.

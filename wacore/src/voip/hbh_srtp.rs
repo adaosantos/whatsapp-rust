@@ -4,6 +4,10 @@
 //! The counter here is libsrtp's AES-ICM with a 2-byte carry (bytes 15 then 14),
 //! NOT a full 128-bit CTR; it only diverges past ~1 MiB/packet (impossible for
 //! audio), but is reproduced faithfully so vectors match.
+//!
+//! wacrg spec: srtp-hop-by-hop (CRY-03). Note: the spec says HBH skips the WAHKDF
+//! layer, but the KAT-pinned implementation applies a labeled HKDF-SHA256 step here
+//! (the spec entry is `status: draft`; the code reflects the captured vectors).
 
 use aes::Aes128;
 use aes::cipher::{Block, BlockCipherEncrypt, KeyInit};
@@ -11,6 +15,15 @@ use aes::cipher::{Block, BlockCipherEncrypt, KeyInit};
 use crate::voip::hkdf_sha256;
 
 const NULL_SALT_32: [u8; 32] = [0u8; 32];
+
+/// Relay-supplied hop-by-hop keying material: 16B master key followed by a 14B master salt.
+pub(crate) const HBH_KEY_LEN: usize = 30;
+
+/// HKDF `info` labels for the WA SFU HBH SRTCP key derivation (KAT-pinned wire values).
+const HBH_UPLINK_SALT_LABEL: &str = "uplink hbh srtcp salt";
+const HBH_UPLINK_KEY_LABEL: &str = "uplink hbh srtcp key";
+const HBH_DOWNLINK_SALT_LABEL: &str = "downlink hbh srtcp salt";
+const HBH_DOWNLINK_KEY_LABEL: &str = "downlink hbh srtcp key";
 
 const LABEL_RTP_ENCRYPTION: u8 = 0x00;
 const LABEL_RTP_AUTH: u8 = 0x01;
@@ -50,7 +63,7 @@ fn keying_from_crypto_key(crypto_key: &[u8]) -> SrtpKeyingMaterial {
         master_salt: [0u8; 14],
     };
     m.master_key.copy_from_slice(&crypto_key[0..16]);
-    m.master_salt.copy_from_slice(&crypto_key[16..30]);
+    m.master_salt.copy_from_slice(&crypto_key[16..HBH_KEY_LEN]);
     m
 }
 
@@ -61,27 +74,27 @@ fn derive_hbh_srtp_key_with_labels(
     salt_label: &str,
     key_label: &str,
 ) -> Option<Vec<u8>> {
-    if hbh_key.len() != 30 {
+    if hbh_key.len() != HBH_KEY_LEN {
         return None;
     }
     let master_key = &hbh_key[0..16];
-    let master_salt = &hbh_key[16..30];
+    let master_salt = &hbh_key[16..HBH_KEY_LEN];
     // WA SFU KDF == HKDF-SHA256 with the literal UTF-8 label as `info`.
     let srtcp_salt = hkdf_sha256(&NULL_SALT_32, master_salt, salt_label.as_bytes(), 32);
     Some(hkdf_sha256(
         &srtcp_salt,
         master_key,
         key_label.as_bytes(),
-        30,
+        HBH_KEY_LEN,
     ))
 }
 
 pub fn derive_hbh_srtp_key_uplink(hbh_key: &[u8]) -> Option<Vec<u8>> {
-    derive_hbh_srtp_key_with_labels(hbh_key, "uplink hbh srtcp salt", "uplink hbh srtcp key")
+    derive_hbh_srtp_key_with_labels(hbh_key, HBH_UPLINK_SALT_LABEL, HBH_UPLINK_KEY_LABEL)
 }
 
 pub fn derive_hbh_srtp_key_downlink(hbh_key: &[u8]) -> Option<Vec<u8>> {
-    derive_hbh_srtp_key_with_labels(hbh_key, "downlink hbh srtcp salt", "downlink hbh srtcp key")
+    derive_hbh_srtp_key_with_labels(hbh_key, HBH_DOWNLINK_SALT_LABEL, HBH_DOWNLINK_KEY_LABEL)
 }
 
 pub fn keying_from_hbh_key_uplink(hbh_key: &[u8]) -> Option<SrtpKeyingMaterial> {

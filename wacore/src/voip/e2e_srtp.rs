@@ -1,6 +1,8 @@
 //! E2E 1:1 SRTP, the primary working path. Keys derive from `callKey` (32B) +
 //! participant LID via HKDF-SHA256, then an AES-CM PRF; payloads use AES-128-CTR
 //! with a 4-byte WARP MESSAGE-INTEGRITY tag (HMAC-SHA1, not verified on recv).
+//!
+//! wacrg spec: srtp-e2e (CRY-05), srtp-master-key (CRY-02), call-key (CRY-01).
 
 use aes::Aes128;
 use ctr::Ctr128BE;

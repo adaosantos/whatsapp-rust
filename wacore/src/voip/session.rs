@@ -6,7 +6,8 @@ use super::e2e_srtp::{
     E2eSrtpKeys, RecvRocTracker, RocTracker, append_warp_mi_tag, crypt_payload, derive_e2e_keys,
 };
 use super::rtp::{
-    RtpHeader, RtpStream, encode_rtp_header, parse_rtp_header, rtp_header_byte_length,
+    RTP_FIXED_HEADER_LEN, RtpHeader, RtpStream, encode_rtp_header, parse_rtp_header,
+    rtp_header_byte_length,
 };
 use super::ssrc::format_e2e_srtp_participant_id;
 use wacore_binary::Jid;
@@ -207,7 +208,7 @@ impl MediaPipeline {
     /// The ROC is derived per-packet from the recv tracker (RFC 3711 guess-index), so the keystream
     /// stays aligned with the sender's across 16-bit seq wraps even under reorder/loss.
     pub fn unprotect_audio(&mut self, packet: &[u8]) -> Option<(RtpHeader, Vec<u8>)> {
-        if packet.len() < 12 + self.warp_mi_tag_len {
+        if packet.len() < RTP_FIXED_HEADER_LEN + self.warp_mi_tag_len {
             return None;
         }
         let without_tag = &packet[..packet.len() - self.warp_mi_tag_len];

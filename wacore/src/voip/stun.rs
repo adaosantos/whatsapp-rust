@@ -5,6 +5,8 @@
 //! Transaction IDs are passed in (the I/O layer supplies 12 random bytes) so this stays
 //! pure and deterministically testable. Protobuf-based allocate builders (0x4024/0x4025
 //! dynamic) come with the waproto voip schemas.
+//!
+//! wacrg spec: stun-relay (REL-02), relay-candidates (REL-01).
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
