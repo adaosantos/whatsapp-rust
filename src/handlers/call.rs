@@ -95,6 +95,11 @@ impl StanzaHandler for CallHandler {
                     // no-op for an incoming call or a call we aren't the caller of (no sender registered).
                     #[cfg(feature = "voip")]
                     if let CallAction::Accept { .. } = &call.action {
+                        // Record the device that answered so a later <terminate> targets it (call
+                        // signaling is addressed per device, not to the bare peer the offer rang).
+                        client
+                            .call_registry()
+                            .set_answering_device(call.action.call_id(), call.from.clone());
                         client
                             .call_registry()
                             .send_rekey(call.action.call_id(), call.from.to_string());

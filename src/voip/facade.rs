@@ -1073,7 +1073,8 @@ pub struct CallHandle {
     /// same-call-id replacement (glare/retry) that superseded it.
     generation: u64,
     /// The call's peer and creator, kept so a consumer can drive `voip().terminate(..)` straight off
-    /// the handle without separately tracking the signaling metadata.
+    /// the handle without separately tracking the signaling metadata. `peer_jid` is the bare LID the
+    /// offer rang; `peer_jid()` upgrades it to the answering device once an `<accept>` arrives.
     peer_jid: Jid,
     call_creator: Jid,
     client_registry: Arc<wacore::voip::CallRegistry>,
@@ -1093,9 +1094,14 @@ impl CallHandle {
         &self.call_id
     }
 
-    /// The peer this call is with (the callee for an outgoing call, the caller for an incoming one).
-    pub fn peer_jid(&self) -> &Jid {
-        &self.peer_jid
+    /// The peer this call is with, as the `<terminate>` target. For an outgoing call this is the
+    /// callee device that answered (learned from the inbound `<accept>`) once one has, since call
+    /// signaling is addressed per device; before any accept, or for an incoming call, it is the bare
+    /// peer the offer rang. Returns owned so it can merge the answering device tracked on the registry.
+    pub fn peer_jid(&self) -> Jid {
+        self.client_registry
+            .answering_device(&self.call_id)
+            .unwrap_or_else(|| self.peer_jid.clone())
     }
 
     /// The call's creator JID, as carried in the signaling (needed by `voip().terminate(..)`).
@@ -1221,6 +1227,36 @@ mod tests {
 
     fn mk_session() -> wacore::voip::CallSession {
         wacore::voip::CallSession::new_incoming("CID-FACADE", caller(), caller())
+    }
+
+    // peer_jid() is the <terminate> target: the bare peer until an <accept> records the answering
+    // device on the registry, then that device (call signaling is addressed per device).
+    #[tokio::test]
+    async fn peer_jid_upgrades_to_the_answering_device() {
+        let client = make_client().await;
+        let generation = client.call_registry().insert(mk_session());
+        let (_ev_tx, ev_rx) = async_channel::unbounded::<CallEvent>();
+        let handle = CallHandle {
+            call_id: "CID-FACADE".into(),
+            generation,
+            peer_jid: caller(),
+            call_creator: caller(),
+            client_registry: client.call_registry(),
+            pending_outgoing_calls: client.pending_outgoing_calls.clone(),
+            muted: Arc::new(AtomicBool::new(false)),
+            events: ev_rx,
+            ended: Arc::new(EndedFlag::default()),
+        };
+        assert_eq!(handle.peer_jid(), caller(), "bare peer before any accept");
+        let device = caller().with_device(2);
+        client
+            .call_registry()
+            .set_answering_device("CID-FACADE", device.clone());
+        assert_eq!(
+            handle.peer_jid(),
+            device,
+            "after the accept the terminate target is the answering device"
+        );
     }
 
     fn engine() -> CallEngine {

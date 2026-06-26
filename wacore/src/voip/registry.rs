@@ -171,6 +171,31 @@ impl CallRegistry {
         }
     }
 
+    /// Caller side: record the callee device that answered (the inbound `<accept>`'s `call.from`), so a
+    /// later `<terminate>` can target it instead of the bare peer the offer rang. Set-once -- the first
+    /// answerer wins, matching the rekey and WA Web's accepted-elsewhere handling. No-op if the call is
+    /// unknown or a device was already recorded.
+    pub fn set_answering_device(&self, call_id: &str, device: Jid) {
+        if let Some(entry) = self
+            .inner
+            .lock()
+            .expect("registry lock poisoned")
+            .get_mut(call_id)
+            && entry.session.answering_device.is_none()
+        {
+            entry.session.answering_device = Some(device);
+        }
+    }
+
+    /// The callee device that answered an outgoing call, if one has, for addressing a `<terminate>`.
+    pub fn answering_device(&self, call_id: &str) -> Option<Jid> {
+        self.inner
+            .lock()
+            .expect("registry lock poisoned")
+            .get(call_id)
+            .and_then(|e| e.session.answering_device.clone())
+    }
+
     /// The current generation token registered under `call_id`, or `None` if unknown. Lets a caller
     /// confirm its registration still owns the call (not superseded/removed) before attaching to it.
     pub fn generation_of(&self, call_id: &str) -> Option<u64> {
@@ -306,6 +331,21 @@ mod tests {
             Jid::new("222222222222222", Server::Lid),
             Jid::new("111111111111111", Server::Lid),
         )
+    }
+
+    #[test]
+    fn answering_device_is_set_once_and_read_back() {
+        let reg = CallRegistry::new();
+        assert_eq!(reg.answering_device("CID"), None, "unknown call has none");
+        reg.insert(session("CID"));
+        assert_eq!(reg.answering_device("CID"), None, "none until an accept");
+        let dev = Jid::new("222222222222222", Server::Lid).with_device(2);
+        reg.set_answering_device("CID", dev.clone());
+        assert_eq!(reg.answering_device("CID"), Some(dev.clone()));
+        // First answerer wins: a later accept from another device is ignored.
+        let other = Jid::new("222222222222222", Server::Lid).with_device(5);
+        reg.set_answering_device("CID", other);
+        assert_eq!(reg.answering_device("CID"), Some(dev));
     }
 
     #[test]

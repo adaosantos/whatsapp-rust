@@ -45,6 +45,12 @@ pub struct CallSession {
     /// callees. Lives on the session so it is dropped automatically whenever the call deregisters --
     /// no separate per-call map to clean up across the many call-end paths.
     pub ring_devices: Vec<Jid>,
+    /// For an OUTGOING call: the callee device (`call.from` of the inbound `<accept>`) that actually
+    /// answered, learned after the offer rang the bare LID. Call signaling other than the offer is
+    /// addressed per device (WA Web `WAWebVoipSendSignalingXmpp` coerces the peer to a device JID), so
+    /// a `<terminate>` must target this device, not the bare peer, or it can miss the companion that
+    /// answered. `None` until the first `<accept>`; set-once (first answerer wins, like the rekey).
+    pub answering_device: Option<Jid>,
     phase: CallPhase,
 }
 
@@ -57,6 +63,7 @@ impl CallSession {
             direction: CallDirection::Outgoing,
             is_video: false,
             ring_devices: Vec::new(),
+            answering_device: None,
             phase: CallPhase::Idle,
         }
     }
@@ -69,6 +76,7 @@ impl CallSession {
             direction: CallDirection::Incoming,
             is_video: false,
             ring_devices: Vec::new(),
+            answering_device: None,
             phase: CallPhase::Ringing,
         }
     }
