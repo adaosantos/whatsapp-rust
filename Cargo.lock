@@ -3332,6 +3332,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "smoothutf8"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b4ec95892483d6d94284caccfddb9b77111a4dcac33ed25d624248def0fa5f1"
+
+[[package]]
 name = "socket2"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3885,6 +3891,7 @@ dependencies = [
  "serde_json",
  "sha1 0.11.0",
  "sha2 0.11.0",
+ "smoothutf8",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
@@ -3934,6 +3941,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
+ "smoothutf8",
  "stable_deref_trait",
  "yoke",
 ]
